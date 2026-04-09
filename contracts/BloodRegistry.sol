@@ -15,6 +15,7 @@ contract BloodRegistry is ERC1155, ERC1155Supply, AccessControl {
     // ──────────────────────────── Roles ─────────────────────────────
     
     bytes32 public constant ADMIN_ROLE = DEFAULT_ADMIN_ROLE;
+    bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
 
     // ──────────────────────────── Enums ────────────────────────────
 
@@ -53,7 +54,7 @@ contract BloodRegistry is ERC1155, ERC1155Supply, AccessControl {
 
     // ──────────────────────────── Events ───────────────────────────
 
-    event UnitRegistered(uint256 indexed tokenId, address indexed donor);
+    event UnitRegistered(uint256 indexed tokenId, address indexed donor, address indexed recipient);
     event StatusUpdated(uint256 indexed tokenId, Status current);
     event ExpiryFlagged(uint256 indexed tokenId, address indexed flagger, uint256 bountyPaid);
     event UnitConsumed(uint256 indexed tokenId, address indexed medicalFacility, uint256 amount);
@@ -75,17 +76,23 @@ contract BloodRegistry is ERC1155, ERC1155Supply, AccessControl {
 
     // ──────────────────────────── Admin ────────────────────────────
 
+    /**
+     * @notice Links the market and authorizes it to mint/update status.
+     */
     function setMarket(address market_) external onlyRole(ADMIN_ROLE) {
         require(market_ != address(0), "Zero address");
         market = market_;
+        _grantRole(MINTER_ROLE, market_);
     }
 
     // ──────────────────────────── Core ─────────────────────────────
 
     /**
-     * @notice Registers a new blood donation and mints tokens to the donor.
+     * @notice Registers a blood unit. 
+     * @param recipient The wallet receiving the tokens (Donor for P2P, Admin for Donations).
      */
     function registerUnit(
+        address recipient,
         uint8   bloodGroup,
         bool    rhPositive,
         uint8   component,
@@ -95,6 +102,11 @@ contract BloodRegistry is ERC1155, ERC1155Supply, AccessControl {
         uint8   priority,
         uint256 amount
     ) external returns (uint256 tokenId) {
+        // Security: If minting to someone else, sender must be an authorized Minter (Donation Contract)
+        if (recipient != msg.sender) {
+            require(hasRole(MINTER_ROLE, msg.sender), "BloodRegistry: caller not authorized to mint to others");
+        }
+
         require(amount > 0, "Amount > 0");
         require(expiryTime > block.timestamp, "Expiry must be in future");
 
@@ -113,19 +125,14 @@ contract BloodRegistry is ERC1155, ERC1155Supply, AccessControl {
             donor: msg.sender
         });
 
-        _mint(msg.sender, tokenId, amount, "");
-        emit UnitRegistered(tokenId, msg.sender);
+        _mint(recipient, tokenId, amount, "");
+        emit UnitRegistered(tokenId, msg.sender, recipient);
     }
 
-    /**
-     * @notice Burns tokens when used and updates status when total supply hits zero.
-     */
     function consumeUnit(uint256 tokenId, uint256 amount) external onlyValid(tokenId) {
         require(balanceOf(msg.sender, tokenId) >= amount, "Insufficient balance");
-        
         _burn(msg.sender, tokenId, amount);
         
-        // ERC1155Supply fix: checks global supply of this tokenId
         if (totalSupply(tokenId) == 0) {
             bloodInfo[tokenId].status = Status.Transfused;
         }
@@ -133,9 +140,6 @@ contract BloodRegistry is ERC1155, ERC1155Supply, AccessControl {
         emit UnitConsumed(tokenId, msg.sender, amount);
     }
 
-    /**
-     * @notice Allows anyone to earn a reward for flagging expired blood units.
-     */
     function flagExpired(uint256 tokenId) external {
         require(isExpired(tokenId), "Not yet expired");
         require(bloodInfo[tokenId].status != Status.Expired, "Already marked");
