@@ -2,11 +2,19 @@
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/token/ERC1155/ERC1155.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/access/AccessControl.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 /// @title BloodRegistry
-/// @notice ERC-1155 contract that tokenizes blood donation units and stores their metadata.
-contract BloodRegistry is ERC1155, Ownable {
+/// @notice ERC-1155 contract that tokenizes blood units with decentralized verification and expiry management.
+contract BloodRegistry is ERC1155, AccessControl {
+    using SafeERC20 for IERC20;
+
+    // ──────────────────────────── Roles ─────────────────────────────
+    
+    bytes32 public constant LAB_ROLE = keccak256("LAB_ROLE");
+    bytes32 public constant ADMIN_ROLE = DEFAULT_ADMIN_ROLE;
 
     // ──────────────────────────── Enums ────────────────────────────
 
@@ -25,13 +33,15 @@ contract BloodRegistry is ERC1155, Ownable {
         uint8   bloodGroup;      // 0:A, 1:B, 2:AB, 3:O
         bool    rhPositive;      // true = Rh+, false = Rh-
         uint8   component;       // 0:Whole, 1:PRBC, 2:Platelets, 3:Plasma
-        uint16  volumeMl;        // approximate volume in ml
-        uint64  collectionTime;  // block.timestamp when registered
-        uint64  expiryTime;      // donor-specified expiry
-        string  storageDetails;  // free-form string (e.g. "Home freezer")
-        uint8   priority;        // 0-255 urgency indicator
-        Status  status;          // lifecycle status
-        address donor;           // original registrant
+        uint16  volumeMl;        
+        uint64  collectionTime;  
+        uint64  expiryTime;      
+        string  storageDetails;  
+        uint8   priority;        // 0-255 urgency
+        Status  status;          
+        address donor;           
+        bool    isScreened;      // B. Verification Feature
+        address verifier;        // Address of the lab that screened the unit
     }
 
     // ──────────────────────────── State ────────────────────────────
@@ -39,40 +49,46 @@ contract BloodRegistry is ERC1155, Ownable {
     uint256 public nextTokenId;
     mapping(uint256 => BloodInfo) public bloodInfo;
 
-    /// @notice Address of the BloodMarket contract, allowed to update status.
     address public market;
+    IERC20 public yoda;
+    uint256 public constant EXPIRY_BOUNTY = 1 * 10**18; // Example: 1 YODA
 
     // ──────────────────────────── Events ───────────────────────────
 
-    event UnitRegistered(uint256 indexed tokenId, address indexed donor, BloodInfo info);
-    event StatusUpdated(uint256 indexed tokenId, Status previous, Status current);
+    event UnitRegistered(uint256 indexed tokenId, address indexed donor);
+    event StatusUpdated(uint256 indexed tokenId, Status current);
+    event UnitVerified(uint256 indexed tokenId, address indexed lab);
+    event ExpiryFlagged(uint256 indexed tokenId, address indexed flagger, uint256 bountyPaid);
+    event UnitConsumed(uint256 indexed tokenId, address indexed medicalFacility, uint256 amount);
+
+    // ──────────────────────────── Modifiers ────────────────────────
+
+    modifier onlyValid(uint256 tokenId) {
+        require(!isExpired(tokenId), "BloodRegistry: unit has expired");
+        require(bloodInfo[tokenId].status != Status.Discarded, "BloodRegistry: unit discarded");
+        _;
+    }
 
     // ──────────────────────────── Constructor ──────────────────────
 
-    /// @param uri_ Metadata URI template (e.g. "https://api.example.com/blood/{id}.json").
-    constructor(string memory uri_) ERC1155(uri_) Ownable(msg.sender) {}
+    constructor(string memory uri_, address yoda_) ERC1155(uri_) {
+        _grantRole(ADMIN_ROLE, msg.sender);
+        yoda = IERC20(yoda_);
+    }
 
     // ──────────────────────────── Admin ────────────────────────────
 
-    /// @notice Sets the marketplace contract address. Call once after deploying BloodMarket.
-    /// @param market_ Address of the BloodMarket contract.
-    function setMarket(address market_) external onlyOwner {
-        require(market_ != address(0), "BloodRegistry: zero address");
+    function setMarket(address market_) external onlyRole(ADMIN_ROLE) {
+        require(market_ != address(0), "Zero address");
         market = market_;
     }
 
     // ──────────────────────────── Core ─────────────────────────────
 
-    /// @notice Registers a new blood donation and mints ERC-1155 tokens to the caller.
-    /// @param bloodGroup   Blood group code (0:A, 1:B, 2:AB, 3:O).
-    /// @param rhPositive   Rh factor (true = positive).
-    /// @param component    Component code (0:Whole, 1:PRBC, 2:Platelets, 3:Plasma).
-    /// @param volumeMl     Approximate volume in millilitres.
-    /// @param expiryTime   Unix timestamp after which the unit is considered expired.
-    /// @param storageDetails Free-form storage description.
-    /// @param priority     Urgency indicator (0-255).
-    /// @param amount       Number of fungible units to mint for this token ID.
-    /// @return tokenId     The newly assigned token ID.
+    /**
+     * @notice Registers a new blood donation.
+     * @dev Added expiry checks and initial screening status.
+     */
     function registerUnit(
         uint8   bloodGroup,
         bool    rhPositive,
@@ -83,47 +99,112 @@ contract BloodRegistry is ERC1155, Ownable {
         uint8   priority,
         uint256 amount
     ) external returns (uint256 tokenId) {
-        require(amount > 0, "BloodRegistry: amount must be > 0");
-        require(volumeMl > 0, "BloodRegistry: volumeMl must be > 0");
-        require(expiryTime > block.timestamp, "BloodRegistry: expiry must be in the future");
+        require(amount > 0, "Amount > 0");
+        require(expiryTime > block.timestamp, "Expiry must be in future");
 
         tokenId = nextTokenId++;
 
-        BloodInfo storage info = bloodInfo[tokenId];
-        info.bloodGroup     = bloodGroup;
-        info.rhPositive     = rhPositive;
-        info.component      = component;
-        info.volumeMl       = volumeMl;
-        info.collectionTime = uint64(block.timestamp);
-        info.expiryTime     = expiryTime;
-        info.storageDetails = storageDetails;
-        info.priority       = priority;
-        info.status         = Status.Available;
-        info.donor          = msg.sender;
+        bloodInfo[tokenId] = BloodInfo({
+            bloodGroup: bloodGroup,
+            rhPositive: rhPositive,
+            component: component,
+            volumeMl: volumeMl,
+            collectionTime: uint64(block.timestamp),
+            expiryTime: expiryTime,
+            storageDetails: storageDetails,
+            priority: priority,
+            status: Status.Available,
+            donor: msg.sender,
+            isScreened: false,
+            verifier: address(0)
+        });
 
         _mint(msg.sender, tokenId, amount, "");
-
-        emit UnitRegistered(tokenId, msg.sender, info);
+        emit UnitRegistered(tokenId, msg.sender);
     }
 
-    /// @notice Updates the lifecycle status of a blood token.
-    /// @dev Callable by the market contract or the current token holder.
-    /// @param tokenId   Token ID to update.
-    /// @param newStatus New status value.
-    function updateStatus(uint256 tokenId, Status newStatus) external {
+    /**
+     * @notice B. Verification "Attestations"
+     * @dev Only verified labs can certify that blood is screened and safe.
+     */
+    function verifyScreening(uint256 tokenId) external onlyRole(LAB_ROLE) onlyValid(tokenId) {
+        BloodInfo storage info = bloodInfo[tokenId];
+        info.isScreened = true;
+        info.verifier = msg.sender;
+        
+        emit UnitVerified(tokenId, msg.sender);
+    }
+
+    /**
+     * @notice C. The "Burn-on-Transfusion"
+     * @dev Removes the token from circulation once used by a medical facility.
+     */
+    function consumeUnit(uint256 tokenId, uint256 amount) external onlyValid(tokenId) {
+        require(balanceOf(msg.sender, tokenId) >= amount, "Insufficient balance");
+        
+        _burn(msg.sender, tokenId, amount);
+        
+        // If all units of this ID are consumed, update global status
+        if (totalSupply(tokenId) == 0) {
+            bloodInfo[tokenId].status = Status.Transfused;
+        }
+
+        emit UnitConsumed(tokenId, msg.sender, amount);
+    }
+
+    /**
+     * @notice A. Automated Expiry Management (Incentive)
+     * @dev Anyone can flag an expired unit to clean the registry and earn a reward.
+     */
+    function flagExpired(uint256 tokenId) external {
+        require(isExpired(tokenId), "Not yet expired");
+        require(bloodInfo[tokenId].status != Status.Expired, "Already marked");
+
+        bloodInfo[tokenId].status = Status.Expired;
+
+        // Optional: Transfer bounty from a protocol reserve to the flagger
+        if (yoda.balanceOf(address(this)) >= EXPIRY_BOUNTY) {
+            yoda.safeTransfer(msg.sender, EXPIRY_BOUNTY);
+        }
+
+        emit ExpiryFlagged(tokenId, msg.sender, EXPIRY_BOUNTY);
+    }
+
+    // ──────────────────────────── View/Overrides ────────────────────
+
+    function updateStatus(uint256 tokenId, Status newStatus) external onlyValid(tokenId) {
         require(
             msg.sender == market || balanceOf(msg.sender, tokenId) > 0,
-            "BloodRegistry: not authorized"
+            "Not authorized"
         );
-        Status previous = bloodInfo[tokenId].status;
         bloodInfo[tokenId].status = newStatus;
-        emit StatusUpdated(tokenId, previous, newStatus);
+        emit StatusUpdated(tokenId, newStatus);
     }
 
-    /// @notice Checks whether a blood token has passed its expiry time.
-    /// @param tokenId Token ID to check.
-    /// @return True if the current block timestamp is past the token's expiryTime.
-    function isExpired(uint256 tokenId) external view returns (bool) {
+    function isExpired(uint256 tokenId) public view returns (bool) {
         return block.timestamp > bloodInfo[tokenId].expiryTime;
+    }
+
+    /**
+     * @dev A. Added automated expiry check to standard transfers.
+     */
+    function _update(address from, address to, uint256[] memory ids, uint256[] memory values)
+        internal
+        override
+    {
+        for (uint256 i = 0; i < ids.length; i++) {
+            require(!isExpired(ids[i]), "BloodRegistry: cannot transfer expired unit");
+        }
+        super._update(from, to, ids, values);
+    }
+
+    // Necessary override for AccessControl + ERC1155
+    function supportsInterface(bytes4 interfaceId)
+        public
+        view
+        override(ERC1155, AccessControl)
+        returns (bool)
+    {
+        return super.supportsInterface(interfaceId);
     }
 }
