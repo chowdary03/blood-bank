@@ -1,169 +1,189 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/token/ERC1155/ERC1155.sol";
+import "@openzeppelin/contracts/token/ERC1155/extensions/ERC1155Supply.sol"; 
+import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "./BloodRegistry.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
-/// @title BloodMarket
-/// @notice Marketplace for listing and purchasing tokenized blood units using YODA tokens.
-contract BloodMarket is Ownable, ReentrancyGuard {
+/// @title BloodRegistry
+/// @notice ERC-1155 contract for tokenizing blood units with supply and expiry management.
+contract BloodRegistry is ERC1155, ERC1155Supply, AccessControl {
     using SafeERC20 for IERC20;
+
+    // ──────────────────────────── Roles ─────────────────────────────
+    
+    bytes32 public constant ADMIN_ROLE = DEFAULT_ADMIN_ROLE;
+
+    // ──────────────────────────── Enums ────────────────────────────
+
+    enum Status {
+        Available,
+        Reserved,
+        Sold,
+        Transfused,
+        Expired,
+        Discarded
+    }
 
     // ──────────────────────────── Structs ──────────────────────────
 
-    struct Listing {
-        uint256 id;
-        address seller;       
-        uint256 tokenId;      
-        uint256 amount;       
-        uint256 pricePerUnit; 
-        uint256 regionCode;   // Numeric identifier for location (Zip, Geohash, etc)
-        uint64  createdAt;
-        bool    active;
+    struct BloodInfo {
+        uint8   bloodGroup;      // 0:A, 1:B, 2:AB, 3:O
+        bool    rhPositive;      // true = Rh+, false = Rh-
+        uint8   component;       // 0:Whole, 1:PRBC, 2:Platelets, 3:Plasma
+        uint16  volumeMl;        
+        uint64  collectionTime;  
+        uint64  expiryTime;      
+        string  storageDetails;  
+        uint8   priority;        // 0-255 urgency
+        Status  status;          
+        address donor;           
     }
 
     // ──────────────────────────── State ────────────────────────────
 
-    IERC20 public immutable yoda;
-    BloodRegistry public immutable registry;
+    uint256 public nextTokenId;
+    mapping(uint256 => BloodInfo) public bloodInfo;
 
-    uint256 public nextListingId;
-    mapping(uint256 => Listing) public listings;
-
-    uint16 public protocolFeeBps;
-    address public feeRecipient;
+    address public market;
+    IERC20 public yoda;
+    uint256 public constant EXPIRY_BOUNTY = 1 * 10**18; // 1 YODA
 
     // ──────────────────────────── Events ───────────────────────────
 
-    event ListingCreated(
-        uint256 indexed id,
-        address indexed seller,
-        uint256 indexed tokenId,
-        uint256 amount,
-        uint256 pricePerUnit,
-        uint256 regionCode
-    );
-    
-    /// @notice Specialized event for off-chain indexers to filter by location.
-    event RegionalListing(uint256 indexed region, uint256 indexed listingId, uint256 tokenId);
+    event UnitRegistered(uint256 indexed tokenId, address indexed donor);
+    event StatusUpdated(uint256 indexed tokenId, Status current);
+    event ExpiryFlagged(uint256 indexed tokenId, address indexed flagger, uint256 bountyPaid);
+    event UnitConsumed(uint256 indexed tokenId, address indexed medicalFacility, uint256 amount);
 
-    event ListingUpdated(uint256 indexed id, uint256 newAmount);
-    event ListingCancelled(uint256 indexed id);
-    event ListingFilled(
-        uint256 indexed id,
-        address indexed buyer,
-        uint256 amount,
-        uint256 totalPaid
-    );
+    // ──────────────────────────── Modifiers ────────────────────────
+
+    modifier onlyValid(uint256 tokenId) {
+        require(!isExpired(tokenId), "BloodRegistry: unit has expired");
+        require(bloodInfo[tokenId].status != Status.Discarded, "BloodRegistry: unit discarded");
+        _;
+    }
 
     // ──────────────────────────── Constructor ──────────────────────
 
-    constructor(address yoda_, address registry_) Ownable(msg.sender) {
-        require(yoda_ != address(0), "BloodMarket: zero yoda address");
-        require(registry_ != address(0), "BloodMarket: zero registry address");
+    constructor(string memory uri_, address yoda_) ERC1155(uri_) {
+        _grantRole(ADMIN_ROLE, msg.sender);
         yoda = IERC20(yoda_);
-        registry = BloodRegistry(registry_);
     }
 
     // ──────────────────────────── Admin ────────────────────────────
 
-    function setFees(uint16 protocolFeeBps_, address feeRecipient_) external onlyOwner {
-        require(protocolFeeBps_ <= 10_000, "BloodMarket: fee exceeds 100%");
-        if (protocolFeeBps_ > 0) {
-            require(feeRecipient_ != address(0), "BloodMarket: zero fee recipient");
-        }
-        protocolFeeBps = protocolFeeBps_;
-        feeRecipient = feeRecipient_;
+    function setMarket(address market_) external onlyRole(ADMIN_ROLE) {
+        require(market_ != address(0), "Zero address");
+        market = market_;
     }
 
-    // ──────────────────────────── Listings ─────────────────────────
+    // ──────────────────────────── Core ─────────────────────────────
 
     /**
-     * @notice Creates a new listing for blood tokens.
-     * @param tokenId The ERC-1155 token ID from the BloodRegistry.
-     * @param amount Units to sell.
-     * @param pricePerUnit Price in YODA (wei) per unit.
-     * @param regionCode Numeric code for regional discovery (e.g. Geohash or Zip).
+     * @notice Registers a new blood donation and mints tokens to the donor.
      */
-    function createListing(
-        uint256 tokenId,
-        uint256 amount,
-        uint256 pricePerUnit,
-        uint256 regionCode
-    ) external nonReentrant returns (uint256 listingId) {
-        require(amount > 0, "BloodMarket: amount must be > 0");
-        require(pricePerUnit > 0, "BloodMarket: price must be > 0");
-        require(!registry.isExpired(tokenId), "BloodMarket: blood unit expired");
-        require(
-            registry.balanceOf(msg.sender, tokenId) >= amount,
-            "BloodMarket: insufficient blood token balance"
-        );
+    function registerUnit(
+        uint8   bloodGroup,
+        bool    rhPositive,
+        uint8   component,
+        uint16  volumeMl,
+        uint64  expiryTime,
+        string calldata storageDetails,
+        uint8   priority,
+        uint256 amount
+    ) external returns (uint256 tokenId) {
+        require(amount > 0, "Amount > 0");
+        require(expiryTime > block.timestamp, "Expiry must be in future");
 
-        listingId = nextListingId++;
+        tokenId = nextTokenId++;
 
-        Listing storage l = listings[listingId];
-        l.id           = listingId;
-        l.seller       = msg.sender;
-        l.tokenId      = tokenId;
-        l.amount       = amount;
-        l.pricePerUnit = pricePerUnit;
-        l.regionCode   = regionCode;
-        l.createdAt    = uint64(block.timestamp);
-        l.active       = true;
+        bloodInfo[tokenId] = BloodInfo({
+            bloodGroup: bloodGroup,
+            rhPositive: rhPositive,
+            component: component,
+            volumeMl: volumeMl,
+            collectionTime: uint64(block.timestamp),
+            expiryTime: expiryTime,
+            storageDetails: storageDetails,
+            priority: priority,
+            status: Status.Available,
+            donor: msg.sender
+        });
 
-        emit ListingCreated(listingId, msg.sender, tokenId, amount, pricePerUnit, regionCode);
+        _mint(msg.sender, tokenId, amount, "");
+        emit UnitRegistered(tokenId, msg.sender);
+    }
+
+    /**
+     * @notice Burns tokens when a medical facility uses the blood unit.
+     * @dev Uses ERC1155Supply to check if total circulation has reached zero.
+     */
+    function consumeUnit(uint256 tokenId, uint256 amount) external onlyValid(tokenId) {
+        require(balanceOf(msg.sender, tokenId) >= amount, "Insufficient balance");
         
-        // This event allows your UI to say "Show me blood within 50 miles of me"
-        emit RegionalListing(regionCode, listingId, tokenId);
-    }
+        _burn(msg.sender, tokenId, amount);
+        
+        // Fixed: totalSupply now available via ERC1155Supply
+        if (totalSupply(tokenId) == 0) {
+            bloodInfo[tokenId].status = Status.Transfused;
+        }
 
-    function cancelListing(uint256 listingId) external nonReentrant {
-        Listing storage l = listings[listingId];
-        require(l.active, "BloodMarket: listing not active");
-        require(msg.sender == l.seller, "BloodMarket: not the seller");
-
-        l.active = false;
-        emit ListingCancelled(listingId);
+        emit UnitConsumed(tokenId, msg.sender, amount);
     }
 
     /**
-     * @notice Atomic purchase: YODA goes to seller, Blood goes to buyer.
+     * @notice Allows anyone to flag an expired unit to earn a YODA reward.
      */
-    function buy(uint256 listingId, uint256 amount) external nonReentrant {
-        Listing storage l = listings[listingId];
+    function flagExpired(uint256 tokenId) external {
+        require(isExpired(tokenId), "Not yet expired");
+        require(bloodInfo[tokenId].status != Status.Expired, "Already marked");
 
-        require(amount > 0, "BloodMarket: amount must be > 0");
-        require(l.active, "Market: listing not active");
-        require(amount <= l.amount, "Market: exceeds listed amount");
-        require(!registry.isExpired(l.tokenId), "Market: blood unit expired");
+        bloodInfo[tokenId].status = Status.Expired;
 
-        uint256 total = amount * l.pricePerUnit;
-        uint256 fee = (total * protocolFeeBps) / 10_000;
-        uint256 sellerAmount = total - fee;
-
-        // 1. Update State (Checks-Effects)
-        l.amount -= amount;
-        if (l.amount == 0) {
-            l.active = false;
+        if (yoda.balanceOf(address(this)) >= EXPIRY_BOUNTY) {
+            yoda.safeTransfer(msg.sender, EXPIRY_BOUNTY);
         }
 
-        // 2. YODA Payment (Interactions)
-        yoda.safeTransferFrom(msg.sender, l.seller, sellerAmount);
-        if (fee > 0) {
-            yoda.safeTransferFrom(msg.sender, feeRecipient, fee);
+        emit ExpiryFlagged(tokenId, msg.sender, EXPIRY_BOUNTY);
+    }
+
+    // ──────────────────────────── View/Overrides ────────────────────
+
+    function updateStatus(uint256 tokenId, Status newStatus) external onlyValid(tokenId) {
+        require(
+            msg.sender == market || balanceOf(msg.sender, tokenId) > 0,
+            "Not authorized"
+        );
+        bloodInfo[tokenId].status = newStatus;
+        emit StatusUpdated(tokenId, newStatus);
+    }
+
+    function isExpired(uint256 tokenId) public view returns (bool) {
+        return block.timestamp > bloodInfo[tokenId].expiryTime;
+    }
+
+    /**
+     * @dev Blocks any transfer of units that have reached their expiry time.
+     */
+    function _update(address from, address to, uint256[] memory ids, uint256[] memory values)
+        internal
+        override(ERC1155, ERC1155Supply)
+    {
+        for (uint256 i = 0; i < ids.length; i++) {
+            require(!isExpired(ids[i]), "BloodRegistry: cannot transfer expired unit");
         }
+        super._update(from, to, ids, values);
+    }
 
-        // 3. Blood Token Transfer (Interactions)
-        registry.safeTransferFrom(l.seller, msg.sender, l.tokenId, amount, "");
-
-        // 4. Update status in Registry if the whole listing is consumed
-        if (!l.active) {
-            registry.updateStatus(l.tokenId, BloodRegistry.Status.Sold);
-        }
-
-        emit ListingFilled(listingId, msg.sender, amount, total);
+    function supportsInterface(bytes4 interfaceId)
+        public
+        view
+        override(ERC1155, AccessControl)
+        returns (bool)
+    {
+        return super.supportsInterface(interfaceId);
     }
 }
