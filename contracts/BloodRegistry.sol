@@ -2,18 +2,18 @@
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/token/ERC1155/ERC1155.sol";
+import "@openzeppelin/contracts/token/ERC1155/extensions/ERC1155Supply.sol"; 
 import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 /// @title BloodRegistry
-/// @notice ERC-1155 contract that tokenizes blood units with decentralized verification and expiry management.
-contract BloodRegistry is ERC1155, AccessControl {
+/// @notice ERC-1155 contract that tokenizes blood units with supply and expiry management.
+contract BloodRegistry is ERC1155, ERC1155Supply, AccessControl {
     using SafeERC20 for IERC20;
 
     // ──────────────────────────── Roles ─────────────────────────────
     
-    bytes32 public constant LAB_ROLE = keccak256("LAB_ROLE");
     bytes32 public constant ADMIN_ROLE = DEFAULT_ADMIN_ROLE;
 
     // ──────────────────────────── Enums ────────────────────────────
@@ -40,8 +40,6 @@ contract BloodRegistry is ERC1155, AccessControl {
         uint8   priority;        // 0-255 urgency
         Status  status;          
         address donor;           
-        bool    isScreened;      // B. Verification Feature
-        address verifier;        // Address of the lab that screened the unit
     }
 
     // ──────────────────────────── State ────────────────────────────
@@ -51,13 +49,12 @@ contract BloodRegistry is ERC1155, AccessControl {
 
     address public market;
     IERC20 public yoda;
-    uint256 public constant EXPIRY_BOUNTY = 1 * 10**18; // Example: 1 YODA
+    uint256 public constant EXPIRY_BOUNTY = 1 * 10**18; 
 
     // ──────────────────────────── Events ───────────────────────────
 
     event UnitRegistered(uint256 indexed tokenId, address indexed donor);
     event StatusUpdated(uint256 indexed tokenId, Status current);
-    event UnitVerified(uint256 indexed tokenId, address indexed lab);
     event ExpiryFlagged(uint256 indexed tokenId, address indexed flagger, uint256 bountyPaid);
     event UnitConsumed(uint256 indexed tokenId, address indexed medicalFacility, uint256 amount);
 
@@ -86,8 +83,7 @@ contract BloodRegistry is ERC1155, AccessControl {
     // ──────────────────────────── Core ─────────────────────────────
 
     /**
-     * @notice Registers a new blood donation.
-     * @dev Added expiry checks and initial screening status.
+     * @notice Registers a new blood donation and mints tokens to the donor.
      */
     function registerUnit(
         uint8   bloodGroup,
@@ -114,9 +110,7 @@ contract BloodRegistry is ERC1155, AccessControl {
             storageDetails: storageDetails,
             priority: priority,
             status: Status.Available,
-            donor: msg.sender,
-            isScreened: false,
-            verifier: address(0)
+            donor: msg.sender
         });
 
         _mint(msg.sender, tokenId, amount, "");
@@ -124,27 +118,14 @@ contract BloodRegistry is ERC1155, AccessControl {
     }
 
     /**
-     * @notice B. Verification "Attestations"
-     * @dev Only verified labs can certify that blood is screened and safe.
-     */
-    function verifyScreening(uint256 tokenId) external onlyRole(LAB_ROLE) onlyValid(tokenId) {
-        BloodInfo storage info = bloodInfo[tokenId];
-        info.isScreened = true;
-        info.verifier = msg.sender;
-        
-        emit UnitVerified(tokenId, msg.sender);
-    }
-
-    /**
-     * @notice C. The "Burn-on-Transfusion"
-     * @dev Removes the token from circulation once used by a medical facility.
+     * @notice Burns tokens when used and updates status when total supply hits zero.
      */
     function consumeUnit(uint256 tokenId, uint256 amount) external onlyValid(tokenId) {
         require(balanceOf(msg.sender, tokenId) >= amount, "Insufficient balance");
         
         _burn(msg.sender, tokenId, amount);
         
-        // If all units of this ID are consumed, update global status
+        // ERC1155Supply fix: checks global supply of this tokenId
         if (totalSupply(tokenId) == 0) {
             bloodInfo[tokenId].status = Status.Transfused;
         }
@@ -153,8 +134,7 @@ contract BloodRegistry is ERC1155, AccessControl {
     }
 
     /**
-     * @notice A. Automated Expiry Management (Incentive)
-     * @dev Anyone can flag an expired unit to clean the registry and earn a reward.
+     * @notice Allows anyone to earn a reward for flagging expired blood units.
      */
     function flagExpired(uint256 tokenId) external {
         require(isExpired(tokenId), "Not yet expired");
@@ -162,7 +142,6 @@ contract BloodRegistry is ERC1155, AccessControl {
 
         bloodInfo[tokenId].status = Status.Expired;
 
-        // Optional: Transfer bounty from a protocol reserve to the flagger
         if (yoda.balanceOf(address(this)) >= EXPIRY_BOUNTY) {
             yoda.safeTransfer(msg.sender, EXPIRY_BOUNTY);
         }
@@ -185,12 +164,9 @@ contract BloodRegistry is ERC1155, AccessControl {
         return block.timestamp > bloodInfo[tokenId].expiryTime;
     }
 
-    /**
-     * @dev A. Added automated expiry check to standard transfers.
-     */
     function _update(address from, address to, uint256[] memory ids, uint256[] memory values)
         internal
-        override
+        override(ERC1155, ERC1155Supply)
     {
         for (uint256 i = 0; i < ids.length; i++) {
             require(!isExpired(ids[i]), "BloodRegistry: cannot transfer expired unit");
@@ -198,7 +174,6 @@ contract BloodRegistry is ERC1155, AccessControl {
         super._update(from, to, ids, values);
     }
 
-    // Necessary override for AccessControl + ERC1155
     function supportsInterface(bytes4 interfaceId)
         public
         view
