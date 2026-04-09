@@ -16,10 +16,11 @@ contract BloodMarket is Ownable, ReentrancyGuard {
 
     struct Listing {
         uint256 id;
-        address seller;       // current owner of the blood tokens
-        uint256 tokenId;      // BloodRegistry token ID
-        uint256 amount;       // units available for sale
-        uint256 pricePerUnit; // YODA wei per unit
+        address seller;       
+        uint256 tokenId;      
+        uint256 amount;       
+        uint256 pricePerUnit; 
+        uint256 regionCode;   // Numeric identifier for location (Zip, Geohash, etc)
         uint64  createdAt;
         bool    active;
     }
@@ -32,10 +33,7 @@ contract BloodMarket is Ownable, ReentrancyGuard {
     uint256 public nextListingId;
     mapping(uint256 => Listing) public listings;
 
-    /// @notice Protocol fee in basis points (100 = 1%). Max 10 000 (100%).
     uint16 public protocolFeeBps;
-
-    /// @notice Address that receives protocol fees.
     address public feeRecipient;
 
     // ──────────────────────────── Events ───────────────────────────
@@ -45,8 +43,13 @@ contract BloodMarket is Ownable, ReentrancyGuard {
         address indexed seller,
         uint256 indexed tokenId,
         uint256 amount,
-        uint256 pricePerUnit
+        uint256 pricePerUnit,
+        uint256 regionCode
     );
+    
+    /// @notice Specialized event for off-chain indexers to filter by location.
+    event RegionalListing(uint256 indexed region, uint256 indexed listingId, uint256 tokenId);
+
     event ListingUpdated(uint256 indexed id, uint256 newAmount);
     event ListingCancelled(uint256 indexed id);
     event ListingFilled(
@@ -58,8 +61,6 @@ contract BloodMarket is Ownable, ReentrancyGuard {
 
     // ──────────────────────────── Constructor ──────────────────────
 
-    /// @param yoda_     Address of the deployed YodaToken contract.
-    /// @param registry_ Address of the deployed BloodRegistry contract.
     constructor(address yoda_, address registry_) Ownable(msg.sender) {
         require(yoda_ != address(0), "BloodMarket: zero yoda address");
         require(registry_ != address(0), "BloodMarket: zero registry address");
@@ -69,9 +70,6 @@ contract BloodMarket is Ownable, ReentrancyGuard {
 
     // ──────────────────────────── Admin ────────────────────────────
 
-    /// @notice Configures the protocol fee and recipient. Only callable by the owner.
-    /// @param protocolFeeBps_ Fee in basis points (max 10 000).
-    /// @param feeRecipient_   Address that receives collected fees.
     function setFees(uint16 protocolFeeBps_, address feeRecipient_) external onlyOwner {
         require(protocolFeeBps_ <= 10_000, "BloodMarket: fee exceeds 100%");
         if (protocolFeeBps_ > 0) {
@@ -83,19 +81,22 @@ contract BloodMarket is Ownable, ReentrancyGuard {
 
     // ──────────────────────────── Listings ─────────────────────────
 
-    /// @notice Creates a new listing for blood tokens. Seller must have already called
-    ///         `BloodRegistry.setApprovalForAll(thisContract, true)`.
-    /// @param tokenId      BloodRegistry token ID to list.
-    /// @param amount       Number of units to sell.
-    /// @param pricePerUnit Price in YODA wei per unit.
-    /// @return listingId   The newly assigned listing ID.
+    /**
+     * @notice Creates a new listing for blood tokens.
+     * @param tokenId The ERC-1155 token ID from the BloodRegistry.
+     * @param amount Units to sell.
+     * @param pricePerUnit Price in YODA (wei) per unit.
+     * @param regionCode Numeric code for regional discovery (e.g. Geohash or Zip).
+     */
     function createListing(
         uint256 tokenId,
         uint256 amount,
-        uint256 pricePerUnit
+        uint256 pricePerUnit,
+        uint256 regionCode
     ) external nonReentrant returns (uint256 listingId) {
         require(amount > 0, "BloodMarket: amount must be > 0");
         require(pricePerUnit > 0, "BloodMarket: price must be > 0");
+        require(!registry.isExpired(tokenId), "BloodMarket: blood unit expired");
         require(
             registry.balanceOf(msg.sender, tokenId) >= amount,
             "BloodMarket: insufficient blood token balance"
@@ -109,14 +110,16 @@ contract BloodMarket is Ownable, ReentrancyGuard {
         l.tokenId      = tokenId;
         l.amount       = amount;
         l.pricePerUnit = pricePerUnit;
+        l.regionCode   = regionCode;
         l.createdAt    = uint64(block.timestamp);
         l.active       = true;
 
-        emit ListingCreated(listingId, msg.sender, tokenId, amount, pricePerUnit);
+        emit ListingCreated(listingId, msg.sender, tokenId, amount, pricePerUnit, regionCode);
+        
+        // This event allows your UI to say "Show me blood within 50 miles of me"
+        emit RegionalListing(regionCode, listingId, tokenId);
     }
 
-    /// @notice Cancels an active listing. Only the original seller can cancel.
-    /// @param listingId ID of the listing to cancel.
     function cancelListing(uint256 listingId) external nonReentrant {
         Listing storage l = listings[listingId];
         require(l.active, "BloodMarket: listing not active");
@@ -126,40 +129,37 @@ contract BloodMarket is Ownable, ReentrancyGuard {
         emit ListingCancelled(listingId);
     }
 
-    /// @notice Purchases blood tokens from an active listing.
-    /// @dev Buyer must have approved this contract to spend sufficient YODA beforehand.
-    /// @param listingId ID of the listing to buy from.
-    /// @param amount    Number of units to purchase (can be partial).
+    /**
+     * @notice Atomic purchase: YODA goes to seller, Blood goes to buyer.
+     */
     function buy(uint256 listingId, uint256 amount) external nonReentrant {
         Listing storage l = listings[listingId];
 
         require(amount > 0, "BloodMarket: amount must be > 0");
-        require(l.active, "BloodMarket: listing not active");
-        require(amount <= l.amount, "BloodMarket: exceeds listed amount");
-        require(!registry.isExpired(l.tokenId), "BloodMarket: blood token expired");
+        require(l.active, "Market: listing not active");
+        require(amount <= l.amount, "Market: exceeds listed amount");
+        require(!registry.isExpired(l.tokenId), "Market: blood unit expired");
 
-        // ── Payment calculation ──
         uint256 total = amount * l.pricePerUnit;
         uint256 fee = (total * protocolFeeBps) / 10_000;
         uint256 sellerAmount = total - fee;
 
-        // ── YODA transfers (checks-effects-interactions: state updated after) ──
-        yoda.safeTransferFrom(msg.sender, l.seller, sellerAmount);
-        if (fee > 0) {
-            yoda.safeTransferFrom(msg.sender, feeRecipient, fee);
-        }
-
-        // ── Blood token transfer ──
-        registry.safeTransferFrom(l.seller, msg.sender, l.tokenId, amount, "");
-
-        // ── Update listing state ──
+        // 1. Update State (Checks-Effects)
         l.amount -= amount;
         if (l.amount == 0) {
             l.active = false;
         }
 
-        // ── Optional: mark token as Sold in the registry ──
-        // Only update if the full listing amount was consumed to avoid noise.
+        // 2. YODA Payment (Interactions)
+        yoda.safeTransferFrom(msg.sender, l.seller, sellerAmount);
+        if (fee > 0) {
+            yoda.safeTransferFrom(msg.sender, feeRecipient, fee);
+        }
+
+        // 3. Blood Token Transfer (Interactions)
+        registry.safeTransferFrom(l.seller, msg.sender, l.tokenId, amount, "");
+
+        // 4. Update status in Registry if the whole listing is consumed
         if (!l.active) {
             registry.updateStatus(l.tokenId, BloodRegistry.Status.Sold);
         }
