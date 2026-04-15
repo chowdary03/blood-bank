@@ -4,101 +4,109 @@ pragma solidity ^0.8.20;
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-
-/** * @dev Interface for the BloodRegistry contract to ensure 
- * the 9-argument registerUnit call is recognized.
- */
-interface IBloodRegistry {
-    function registerUnit(
-        address recipient,
-        uint8   bloodGroup,
-        bool    rhPositive,
-        uint8   component,
-        uint16  volumeMl,
-        uint64  expiryTime,
-        string  calldata storageDetails,
-        uint8   priority,
-        uint256 amount
-    ) external returns (uint256);
-}
+import "./BloodRegistry.sol";
 
 /// @title BloodDonation
-/// @notice Handles the reward and ownership swap logic for blood donations.
+/// @notice Handles altruistic blood donations.
+/// @dev Flow:
+///   1. Donor calls `donate(...)` with blood details.
+///   2. Blood tokens are minted to the ADMIN (owner), not the donor.
+///   3. Donor receives a small YODA appreciation reward from this contract's balance.
+///   4. Admin later lists donated blood on BloodMarket at a FLAT RATE (cheaper
+///      than P2P sellers) — since seller == owner, BloodMarket PATH A gives
+///      admin 100% of sale proceeds.
+///
+///   This contract needs MINTER_ROLE on BloodRegistry so it can mint to admin.
+///   Admin must pre-fund this contract with YODA for appreciation payouts.
 contract BloodDonation is Ownable {
     using SafeERC20 for IERC20;
 
-    IBloodRegistry public immutable registry;
+    // ──────────────────────────── State ────────────────────────────
+
+    BloodRegistry public immutable registry;
     IERC20 public immutable yoda;
 
-    // 0.01 YODA reward per pint (assuming 18 decimals)
-    // 0.01 * 10^18 = 10,000,000,000,000,000 (1e16)
-    uint256 public constant REWARD_PER_PINT = 1e16; 
+    /// @notice YODA reward paid to each altruistic donor (in wei).
+    uint256 public appreciationReward;
 
-    event BloodDonated(
-        address indexed donor, 
-        uint256 tokenId, 
-        uint256 pints, 
+    // ──────────────────────────── Events ───────────────────────────
+
+    event Donated(
+        uint256 indexed tokenId,
+        address indexed donor,
+        address indexed mintedTo,
+        uint256 amount,
         uint256 rewardPaid
     );
+    event RewardUpdated(uint256 oldReward, uint256 newReward);
 
-    constructor(address _registry, address _yoda) Ownable(msg.sender) {
-        registry = IBloodRegistry(_registry);
-        yoda = IERC20(_yoda);
+    // ──────────────────────────── Constructor ──────────────────────
+
+    /// @param registry_          Address of BloodRegistry.
+    /// @param yoda_              Address of YodaToken.
+    /// @param appreciationReward_ Initial YODA reward per donation (in wei, e.g. 5 * 10^18 = 5 YODA).
+    constructor(
+        address registry_,
+        address yoda_,
+        uint256 appreciationReward_
+    ) Ownable(msg.sender) {
+        require(registry_ != address(0), "Zero registry");
+        require(yoda_ != address(0), "Zero yoda");
+        registry = BloodRegistry(registry_);
+        yoda = IERC20(yoda_);
+        appreciationReward = appreciationReward_;
     }
 
-    /**
-     * @notice Donor contributes blood.
-     * @dev Mints the units directly to the ADMIN so the Market treats it as platform stock.
-     * @param bloodGroup 0:A, 1:B, 2:AB, 3:O
-     * @param rhPositive True for +, False for -
-     * @param component 0:Whole, 1:PRBC, 2:Platelets, 3:Plasma
-     * @param volumeMl Volume in milliliters (e.g., 473 for a pint)
-     * @param expiryTime Unix timestamp for blood expiration
-     * @param storageDetails String describing storage requirements
-     * @param pintAmount Number of units/pints donated (multiplier for reward)
-     */
+    // ──────────────────────────── Admin ────────────────────────────
+
+    /// @notice Admin adjusts the appreciation reward amount.
+    function setReward(uint256 newReward) external onlyOwner {
+        emit RewardUpdated(appreciationReward, newReward);
+        appreciationReward = newReward;
+    }
+
+    /// @notice Admin withdraws excess YODA from this contract.
+    function withdrawYoda(uint256 amount) external onlyOwner {
+        yoda.safeTransfer(msg.sender, amount);
+    }
+
+    // ──────────────────────────── Core ─────────────────────────────
+
+    /// @notice Altruistic donor registers blood. Tokens go to admin, donor gets YODA reward.
+    /// @param bloodGroup   0:A, 1:B, 2:AB, 3:O
+    /// @param rhPositive   Rh factor
+    /// @param component    0:Whole, 1:PRBC, 2:Platelets, 3:Plasma
+    /// @param expiryTime   Expiry unix timestamp
+    /// @param metadataHash keccak256 of the full off-chain metadata JSON
+    /// @param amount       Number of units
+    /// @return tokenId     Newly minted token ID
     function donate(
         uint8   bloodGroup,
         bool    rhPositive,
         uint8   component,
-        uint16  volumeMl,
         uint64  expiryTime,
-        string  calldata storageDetails,
-        uint256 pintAmount
-    ) external {
-        require(pintAmount > 0, "Must donate at least 1 pint");
-
-        // 1. MINT TO ADMIN (The owner of this donation contract)
-        // This ensures that in BloodMarket, (l.seller == owner()) will be true.
-        uint256 tokenId = registry.registerUnit(
-            owner(),         // Recipient is the ADMIN
+        bytes32 metadataHash,
+        uint256 amount
+    ) external returns (uint256 tokenId) {
+        // Mint blood tokens to the admin (owner), not the donor.
+        // This contract must hold MINTER_ROLE on BloodRegistry.
+        tokenId = registry.registerUnit(
+            owner(),        // recipient = admin
             bloodGroup,
             rhPositive,
             component,
-            volumeMl,
             expiryTime,
-            storageDetails,
-            1,               // Default Priority
-            pintAmount       // Number of tokens (pints)
+            metadataHash,
+            amount
         );
 
-        // 2. CALCULATE AND PAY REWARD
-        uint256 totalReward = pintAmount * REWARD_PER_PINT;
-        
-        require(
-            yoda.balanceOf(address(this)) >= totalReward, 
-            "Reward pool empty, contact admin"
-        );
-        
-        yoda.safeTransfer(msg.sender, totalReward);
+        // Pay appreciation reward to donor (if contract has enough YODA)
+        uint256 rewardPaid = 0;
+        if (appreciationReward > 0 && yoda.balanceOf(address(this)) >= appreciationReward) {
+            rewardPaid = appreciationReward;
+            yoda.safeTransfer(msg.sender, rewardPaid);
+        }
 
-        emit BloodDonated(msg.sender, tokenId, pintAmount, totalReward);
-    }
-
-    /**
-     * @notice Allows Admin to fund the contract with YODA or withdraw tokens.
-     */
-    function withdrawTokens(address token, uint256 amount) external onlyOwner {
-        IERC20(token).safeTransfer(owner(), amount);
+        emit Donated(tokenId, msg.sender, owner(), amount, rewardPaid);
     }
 }
