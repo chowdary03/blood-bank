@@ -3,10 +3,10 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 export const ADDRESSES = {
-  YodaToken:     "0x5FbDB2315678afecb367f032d93F642f64180aa3",
-  BloodRegistry: "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512",
-  BloodMarket:   "0xDc64a140Aa3E981100a9becA4E685f962f0cF6C9",
-  BloodDonation: "0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9",
+  YodaToken:     "0x4B82705968373E192A701fc7A4291347322A942e",
+  BloodRegistry: "0xd1bBEAdB2ecF829f29721cdAa9060167119722ba",
+  BloodMarket:   "0xBd8A3c6A8D3eBC8159a5F1a5919b1C094C282D7e",
+  BloodDonation: "0x4A8c8234fE569b145EbFa5287B6Cd63a8d61baA1",
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
