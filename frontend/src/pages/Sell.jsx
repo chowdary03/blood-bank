@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { keccak256, toUtf8Bytes } from "ethers";
+import { keccak256, toUtf8Bytes, parseUnits } from "ethers";
 import toast from "react-hot-toast";
 import { useWeb3 } from "../Web3Provider";
 import TxButton from "../components/TxButton";
@@ -93,7 +93,7 @@ export default function Sell() {
       toast.success("Marketplace approved!", { id: "approval" });
     }
 
-    const priceWei = BigInt(Math.floor(Number(pricePerUnit) * 1e18));
+    const priceWei = parseUnits(pricePerUnit, 2);
 
     toast.loading("Creating listing...", { id: "list" });
     const tx = await contracts.market.createListing(

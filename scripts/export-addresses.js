@@ -58,6 +58,12 @@ function main() {
     if (contractName) addresses[contractName] = addr;
   }
 
+  // YodaToken is external (professor-issued) — inject its known address
+  const EXTERNAL_YODA = "0xbd27d0b7F9fedb5A2A2C3ceF5dC9c70f3CF64Af2";
+  if (!addresses["YodaToken"]) {
+    addresses["YodaToken"] = EXTERNAL_YODA;
+  }
+
   const required = ["YodaToken", "BloodRegistry", "BloodDonation", "BloodMarket"];
   for (const name of required) {
     if (!addresses[name]) {

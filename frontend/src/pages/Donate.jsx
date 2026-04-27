@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { keccak256, toUtf8Bytes, formatEther } from "ethers";
+import { keccak256, toUtf8Bytes, formatUnits } from "ethers";
 import toast from "react-hot-toast";
 import { useWeb3 } from "../Web3Provider";
 import TxButton from "../components/TxButton";
@@ -28,7 +28,7 @@ export default function Donate() {
   async function loadReward() {
     try {
       const r = await contracts.donation.appreciationReward();
-      setReward(formatEther(r));
+      setReward(formatUnits(r, 2));
     } catch {}
   }
 
@@ -66,7 +66,7 @@ export default function Donate() {
         const parsed = contracts.donation.interface.parseLog(log);
         if (parsed?.name === "Donated") {
           tokenId = Number(parsed.args.tokenId);
-          rewardPaid = formatEther(parsed.args.rewardPaid);
+          rewardPaid = formatUnits(parsed.args.rewardPaid, 2);
           break;
         }
       } catch {}

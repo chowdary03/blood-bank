@@ -1,1 +1,5 @@
+await yoda.balanceOf(me.address)  // raw balance
+await yoda.decimals()          // check actual decimals
+const [me] = await ethers.getSigners()
+const yoda = await ethers.getContractAt("YodaToken", "0xbd27d0b7F9fedb5A2A2C3ceF5dC9c70f3CF64Af2")
 que

@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { formatEther, parseEther } from "ethers";
+import { formatUnits, parseUnits } from "ethers";
 import toast from "react-hot-toast";
 import { useWeb3 } from "../Web3Provider";
 import BloodCard from "../components/BloodCard";
@@ -72,7 +72,7 @@ export default function Dashboard() {
             listingId: Number(l.id),
             tokenId: Number(l.tokenId),
             amount: Number(l.amount),
-            pricePerUnit: formatEther(l.pricePerUnit),
+            pricePerUnit: formatUnits(l.pricePerUnit, 2),
             bloodInfo: {
               bloodGroup: Number(info.bloodGroup),
               rhPositive: info.rhPositive,
@@ -122,7 +122,7 @@ export default function Dashboard() {
       toast.success("Approved!", { id: "approval" });
     }
 
-    const priceWei = parseEther(price);
+    const priceWei = parseUnits(price, 2);
     toast.loading("Creating listing...", { id: `list-${tokenId}` });
     const tx = await contracts.market.createListing(BigInt(tokenId), BigInt(amt), priceWei);
     await tx.wait();

@@ -1,18 +1,16 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // Hardhat Ignition – BloodBank Deployment Module
 //
-// Deployment order and post-deploy wiring:
-//   1. YodaToken        (ERC-20 payment token, zero initial supply)
-//   2. BloodRegistry    (ERC-1155 blood unit tokens, needs yoda address)
-//   3. BloodDonation    (handles altruistic donations, mints to admin)
-//   4. BloodMarket      (P2P + platform marketplace)
+// Uses the EXTERNAL professor-issued YodaToken — we do NOT deploy our own.
+// Only deploys: BloodRegistry, BloodDonation, BloodMarket.
 //
-// Post-deploy calls (all done atomically by Ignition):
-//   a. registry.setMarket(market)          → links market, grants MINTER_ROLE
+// Post-deploy wiring:
+//   a. registry.setMarket(market)               → links market, grants MINTER_ROLE
 //   b. registry.grantRole(MINTER_ROLE, donation) → lets donation contract mint
-//   c. yoda.mint(donation, 10 000 YODA)   → pre-fund donor appreciation rewards
-//   d. yoda.mint(registry, 1 000 YODA)    → pre-fund expiry bounty payouts
-//   e. yoda.mint(deployer, 100 000 YODA)  → admin tokens for marketplace / testing
+//
+// Note: Donor appreciation rewards and expiry bounties require YODA to be
+// manually transferred to the BloodDonation and BloodRegistry contracts.
+// The deployer must do this after deployment using their own YODA balance.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const { buildModule } = require("@nomicfoundation/hardhat-ignition/modules");
@@ -21,14 +19,15 @@ const { buildModule } = require("@nomicfoundation/hardhat-ignition/modules");
 const MINTER_ROLE =
   "0x9f2df0fed2c77648de5860a4cc508cd0818c85b8b8a1ab4ceeef8d981c8956a6";
 
-// Adjust these values to suit your deployment
-const BASE_URI  = "https://api.bloodchain.example/blood/{id}.json";
-const REWARD_WEI = 5n * 10n ** 18n;     // 5 YODA per altruistic donation
+// ── External YODA token issued by professor — not deployed by us ───────────
+const EXTERNAL_YODA_ADDRESS = "0xbd27d0b7F9fedb5A2A2C3ceF5dC9c70f3CF64Af2";
 
-module.exports = buildModule("BloodBankModule", (m) => {
-  // ── 1. YodaToken ──────────────────────────────────────────────────────────
-  // initialSupply = 0  (we will mint via the admin calls below)
-  const yoda = m.contract("YodaToken", [0n]);
+const BASE_URI   = "https://api.bloodchain.example/blood/{id}.json";
+const REWARD_WEI = 5n * 10n ** 2n;   // 5 YODA per altruistic donation (YODA has 2 decimals)
+
+module.exports = buildModule("BloodBankModuleV2", (m) => {
+  // ── 1. Reference external YodaToken (not deploying) ───────────────────────
+  const yoda = m.contractAt("YodaToken", EXTERNAL_YODA_ADDRESS);
 
   // ── 2. BloodRegistry ──────────────────────────────────────────────────────
   const registry = m.contract("BloodRegistry", [BASE_URI, yoda]);
@@ -50,21 +49,6 @@ module.exports = buildModule("BloodBankModule", (m) => {
   m.call(registry, "grantRole", [MINTER_ROLE, donation], {
     id: "grantMinterToDonation",
     after: [setMarket],
-  });
-
-  // c) Fund BloodDonation with YODA for donor appreciation payouts
-  m.call(yoda, "mint", [donation, 10_000n * 10n ** 18n], {
-    id: "fundDonationRewards",
-  });
-
-  // d) Fund BloodRegistry with YODA for expiry-bounty payouts
-  m.call(yoda, "mint", [registry, 1_000n * 10n ** 18n], {
-    id: "fundExpiryBounties",
-  });
-
-  // e) Mint a working balance to the deployer / admin
-  m.call(yoda, "mint", [m.getAccount(0), 100_000n * 10n ** 18n], {
-    id: "mintToDeployer",
   });
 
   return { yoda, registry, donation, market };

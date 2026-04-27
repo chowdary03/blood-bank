@@ -1,5 +1,6 @@
 import { createContext, useContext, useState, useEffect, useCallback } from "react";
-import { BrowserProvider, Contract, formatEther, parseEther } from "ethers";
+import { BrowserProvider, Contract, formatUnits, parseUnits } from "ethers";
+import { YODA_DECIMALS } from "./contracts";
 import {
   ADDRESSES, YODA_ABI, REGISTRY_ABI, MARKET_ABI, DONATION_ABI,
 } from "./contracts";
@@ -46,7 +47,7 @@ export default function Web3Provider({ children }) {
     // YODA balance
     try {
       const bal = await yoda.balanceOf(addr);
-      setYodaBalance(formatEther(bal));
+      setYodaBalance(formatUnits(bal, YODA_DECIMALS));
     } catch { setYodaBalance("0"); }
   }, []);
 
@@ -55,7 +56,7 @@ export default function Web3Provider({ children }) {
     if (!contracts || !account) return;
     try {
       const bal = await contracts.yoda.balanceOf(account);
-      setYodaBalance(formatEther(bal));
+      setYodaBalance(formatUnits(bal, YODA_DECIMALS));
     } catch {}
   }, [contracts, account]);
 
@@ -76,7 +77,9 @@ export default function Web3Provider({ children }) {
     <Web3Ctx.Provider value={{
       account, provider, signer, contracts,
       yodaBalance, isAdmin, chainId,
-      connect, refreshBalance, formatEther, parseEther,
+      connect, refreshBalance,
+      formatEther: (v) => formatUnits(v, YODA_DECIMALS),
+      parseEther:  (v) => parseUnits(String(v), YODA_DECIMALS),
     }}>
       {children}
     </Web3Ctx.Provider>
