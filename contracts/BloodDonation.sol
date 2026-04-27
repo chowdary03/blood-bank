@@ -97,7 +97,8 @@ contract BloodDonation is Ownable {
             component,
             expiryTime,
             metadataHash,
-            amount
+            amount,
+            msg.sender      // actualDonor = the real human who called donate()
         );
 
         // Pay appreciation reward to donor (if contract has enough YODA)

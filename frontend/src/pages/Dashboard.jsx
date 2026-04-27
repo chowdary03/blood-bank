@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { formatEther } from "ethers";
+import { formatEther, parseEther } from "ethers";
 import toast from "react-hot-toast";
 import { useWeb3 } from "../Web3Provider";
 import BloodCard from "../components/BloodCard";
@@ -11,7 +11,12 @@ export default function Dashboard() {
   const [myTokens, setMyTokens] = useState([]);
   const [myListings, setMyListings] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [tab, setTab] = useState("tokens"); // tokens | listings
+  const [tab, setTab] = useState("tokens");
+
+  // Inline list-for-sale state: tokenId → price string
+  const [listingPrice, setListingPrice] = useState({}); // { [tokenId]: "10" }
+  const [listingAmount, setListingAmount] = useState({}); // { [tokenId]: "1" }
+  const [listingOpen, setListingOpen] = useState({}); // { [tokenId]: true/false }
 
   useEffect(() => {
     if (contracts && account) loadDashboard();
@@ -30,6 +35,10 @@ export default function Dashboard() {
         if (bal > 0) {
           const info = await contracts.registry.bloodInfo(i);
           const expired = await contracts.registry.isExpired(i);
+          // If user holds the token but chain says "Sold" (status 2), that means
+          // they just bought it from the marketplace — override to "Available" (0).
+          const onChainStatus = Number(info.status);
+          const displayStatus = (onChainStatus === 2) ? 0 : onChainStatus;
           tokens.push({
             tokenId: i,
             balance: bal,
@@ -38,7 +47,7 @@ export default function Dashboard() {
               bloodGroup: Number(info.bloodGroup),
               rhPositive: info.rhPositive,
               component: Number(info.component),
-              status: Number(info.status),
+              status: displayStatus,
               collectionTime: info.collectionTime,
               expiryTime: info.expiryTime,
               donor: info.donor,
@@ -88,6 +97,47 @@ export default function Dashboard() {
     const tx = await contracts.registry.updateStatus(tokenId, 4); // 4 = Expired
     await tx.wait();
     toast.success("Unit flagged as expired", { id: "flag" });
+    await loadDashboard();
+  }
+
+  async function handleListToken(tokenId, balance) {
+    const price = listingPrice[tokenId] || "1";
+    const amt   = listingAmount[tokenId] || "1";
+
+    if (Number(amt) < 1 || Number(amt) > balance) {
+      toast.error(`Amount must be between 1 and ${balance}`);
+      return;
+    }
+    if (Number(price) <= 0) {
+      toast.error("Price must be greater than 0");
+      return;
+    }
+
+    // Approve market to move tokens if not already approved
+    const approved = await contracts.registry.isApprovedForAll(account, contracts.market.target);
+    if (!approved) {
+      toast.loading("Approving marketplace...", { id: "approval" });
+      const approveTx = await contracts.registry.setApprovalForAll(contracts.market.target, true);
+      await approveTx.wait();
+      toast.success("Approved!", { id: "approval" });
+    }
+
+    const priceWei = parseEther(price);
+    toast.loading("Creating listing...", { id: `list-${tokenId}` });
+    const tx = await contracts.market.createListing(BigInt(tokenId), BigInt(amt), priceWei);
+    await tx.wait();
+    toast.success(`Token #${tokenId} listed for ${price} YODA/unit`, { id: `list-${tokenId}` });
+
+    setListingOpen((s) => ({ ...s, [tokenId]: false }));
+    await refreshBalance();
+    await loadDashboard();
+  }
+
+  async function handleCancelListing(listingId) {
+    toast.loading(`Cancelling listing #${listingId}...`, { id: `cancel-${listingId}` });
+    const tx = await contracts.market.cancelListing(BigInt(listingId));
+    await tx.wait();
+    toast.success(`Listing #${listingId} cancelled. Tokens returned to your wallet.`, { id: `cancel-${listingId}` });
     await loadDashboard();
   }
 
@@ -143,6 +193,8 @@ export default function Dashboard() {
                     <span className="info-value">{t.balance} unit{t.balance > 1 ? "s" : ""}</span>
                   </div>
                 </div>
+
+                {/* Flag expired */}
                 {t.expired && t.bloodInfo.status !== 4 && (
                   <TxButton
                     onClick={() => handleFlagExpired(t.tokenId)}
@@ -150,6 +202,54 @@ export default function Dashboard() {
                   >
                     Flag as Expired
                   </TxButton>
+                )}
+
+                {/* List for sale */}
+                {!t.expired && (
+                  <>
+                    {listingOpen[t.tokenId] ? (
+                      <div className="inline-list-form">
+                        <div className="form-row">
+                          <label>Units to list</label>
+                          <input
+                            type="number" min="1" max={t.balance}
+                            value={listingAmount[t.tokenId] || "1"}
+                            onChange={(e) => setListingAmount((s) => ({ ...s, [t.tokenId]: e.target.value }))}
+                          />
+                        </div>
+                        <div className="form-row">
+                          <label>Price / unit (YODA)</label>
+                          <input
+                            type="number" min="0.001" step="0.1"
+                            value={listingPrice[t.tokenId] || "1"}
+                            onChange={(e) => setListingPrice((s) => ({ ...s, [t.tokenId]: e.target.value }))}
+                          />
+                        </div>
+                        <div className="btn-row">
+                          <TxButton
+                            onClick={() => handleListToken(t.tokenId, t.balance)}
+                            className="btn btn-primary btn-sm"
+                          >
+                            Confirm Listing
+                          </TxButton>
+                          <button
+                            className="btn btn-outline btn-sm"
+                            onClick={() => setListingOpen((s) => ({ ...s, [t.tokenId]: false }))}
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <button
+                        className="btn btn-primary btn-full"
+                        onClick={() => setListingOpen((s) => ({ ...s, [t.tokenId]: true }))}
+                      >
+                        List for Sale
+                      </button>
+                    )}
+
+                  </>
                 )}
               </BloodCard>
             ))}
@@ -179,6 +279,12 @@ export default function Dashboard() {
                     <span className="info-value">{l.amount} units</span>
                   </div>
                 </div>
+                <TxButton
+                  onClick={() => handleCancelListing(l.listingId)}
+                  className="btn btn-danger btn-full"
+                >
+                  Cancel Listing (reclaim tokens)
+                </TxButton>
               </BloodCard>
             ))}
           </div>

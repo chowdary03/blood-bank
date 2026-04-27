@@ -110,6 +110,8 @@ contract BloodRegistry is ERC1155, AccessControl {
     /// @param expiryTime   Unix timestamp – must be in the future
     /// @param metadataHash keccak256 of the full off-chain JSON blob
     /// @param amount       Number of fungible units to mint
+    /// @param actualDonor  Real human donor address. Pass address(0) to default to msg.sender.
+    ///                     Used when a contract (e.g. BloodDonation) calls on behalf of a human.
     function registerUnit(
         address recipient,
         uint8   bloodGroup,
@@ -117,7 +119,8 @@ contract BloodRegistry is ERC1155, AccessControl {
         uint8   component,
         uint64  expiryTime,
         bytes32 metadataHash,
-        uint256 amount
+        uint256 amount,
+        address actualDonor
     ) external returns (uint256 tokenId) {
         if (recipient != msg.sender) {
             require(
@@ -128,6 +131,8 @@ contract BloodRegistry is ERC1155, AccessControl {
         require(amount > 0, "Amount > 0");
         require(expiryTime > block.timestamp, "Expiry must be in future");
 
+        address donorAddress = (actualDonor != address(0)) ? actualDonor : msg.sender;
+
         tokenId = nextTokenId++;
 
         bloodInfo[tokenId] = BloodInfo({
@@ -137,12 +142,12 @@ contract BloodRegistry is ERC1155, AccessControl {
             status:         Status.Available,
             collectionTime: uint64(block.timestamp),
             expiryTime:     expiryTime,
-            donor:          msg.sender,
+            donor:          donorAddress,
             metadataHash:   metadataHash
         });
 
         _mint(recipient, tokenId, amount, "");
-        emit UnitRegistered(tokenId, msg.sender, recipient, metadataHash);
+        emit UnitRegistered(tokenId, donorAddress, recipient, metadataHash);
     }
 
     // ──────────────────────────── Lifecycle ────────────────────────

@@ -50,6 +50,7 @@ export default function Sell() {
       BigInt(expiryTime),
       metadataHash,
       BigInt(amount),
+      account,                    // actualDonor = the P2P seller themselves
     );
 
     const receipt = await tx.wait();

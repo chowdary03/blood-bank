@@ -48,7 +48,8 @@ export default function Marketplace() {
             bloodGroup: Number(info.bloodGroup),
             rhPositive: info.rhPositive,
             component: Number(info.component),
-            status: Number(info.status),
+            // Token is actively listed — always show as Available regardless of on-chain status
+            status: 0,
             collectionTime: info.collectionTime,
             expiryTime: info.expiryTime,
             donor: info.donor,

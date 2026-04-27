@@ -5,10 +5,17 @@
   "scripts": {
     "compile": "npx hardhat compile",
     "test": "npx hardhat test",
-    "node": "npx hardhat node"
+    "node": "npx hardhat node",
+    "deploy:local": "npx hardhat ignition deploy ignition/modules/BloodBank.js --network localhost",
+    "deploy:sepolia": "npx hardhat ignition deploy ignition/modules/BloodBank.js --network sepolia",
+    "export:local": "node scripts/export-addresses.js --network localhost",
+    "export:sepolia": "node scripts/export-addresses.js --network sepolia",
+    "verify:sepolia": "npx hardhat ignition verify chain-11155111 --network sepolia",
+    "frontend": "cd frontend && npm run dev"
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "dotenv": "^16.6.1",
     "hardhat": "^2.22.0"
   },
   "dependencies": {

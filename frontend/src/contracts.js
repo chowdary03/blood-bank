@@ -3,10 +3,10 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 export const ADDRESSES = {
-  YodaToken:     "0xd9145CCE52D386f254917e481eB44e9943F39138",
-  BloodRegistry: "0xd8b934580fcE35a11B58C6D73aDeE468a2833fa8",
-  BloodMarket:   "0xf8e81D47203A594245E36C48e151709F0C19fBe8",
-  BloodDonation: "0xD7ACd2a9FD159E69Bb102A1ca21C9a3e3A5F771B",
+  YodaToken:     "0x5FbDB2315678afecb367f032d93F642f64180aa3",
+  BloodRegistry: "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512",
+  BloodMarket:   "0xDc64a140Aa3E981100a9becA4E685f962f0cF6C9",
+  BloodDonation: "0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9",
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -31,7 +31,7 @@ export const REGISTRY_ABI = [
   "function isExpired(uint256) view returns (bool)",
   "function setApprovalForAll(address operator, bool approved)",
   "function isApprovedForAll(address account, address operator) view returns (bool)",
-  "function registerUnit(address recipient, uint8 bloodGroup, bool rhPositive, uint8 component, uint64 expiryTime, bytes32 metadataHash, uint256 amount) returns (uint256)",
+  "function registerUnit(address recipient, uint8 bloodGroup, bool rhPositive, uint8 component, uint64 expiryTime, bytes32 metadataHash, uint256 amount, address actualDonor) returns (uint256)",
   "function updateStatus(uint256 tokenId, uint8 newStatus)",
   "function market() view returns (address)",
   "event UnitRegistered(uint256 indexed tokenId, address indexed donor, address indexed recipient, bytes32 metadataHash)",
@@ -42,11 +42,13 @@ export const MARKET_ABI = [
   "function nextListingId() view returns (uint256)",
   "function listings(uint256) view returns (uint256 id, address seller, uint256 tokenId, uint256 amount, uint256 pricePerUnit, bool active)",
   "function createListing(uint256 tokenId, uint256 amount, uint256 pricePerUnit)",
+  "function cancelListing(uint256 listingId)",
   "function buy(uint256 listingId, uint256 amount)",
   "function owner() view returns (address)",
   "function P2P_FEE_BPS() view returns (uint256)",
   "event ListingCreated(uint256 indexed id, address indexed seller, uint256 indexed tokenId, uint256 amount, uint256 pricePerUnit)",
   "event ListingFilled(uint256 indexed id, address indexed buyer, uint256 amount, uint256 totalPaid)",
+  "event ListingCancelled(uint256 indexed id, address indexed seller)",
 ];
 
 export const DONATION_ABI = [
